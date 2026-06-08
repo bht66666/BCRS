@@ -2039,7 +2039,10 @@ class A2C2fSparse(nn.Module):
 
 
 class BCRSAttn(nn.Module):
-    """Boundary-contrast-repulsion attention used for dense-object separation."""
+    """Boundary-contrast-repulsion attention used for dense-object separation.
+
+    The implementation separates low-level cues, response maps, and final guided fusion branches.
+    """
 
     def __init__(
         self,
@@ -2118,63 +2121,81 @@ class BCRSAttn(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         xn = self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
         value = self.value(xn)
-        local_feat = self.local(value)
-        context_feat = self.context(value)
+        local_texture_cue = self.local(value)
+        context_receptive_cue = self.context(value)
         if not self.enable_context:
-            context_feat = torch.zeros_like(context_feat)
+            context_receptive_cue = torch.zeros_like(context_receptive_cue)
 
-        contrast = value - F.avg_pool2d(value, kernel_size=3, stride=1, padding=1)
-        contrast_mag = contrast.abs().mean(1, keepdim=True)
-        center_residual = F.relu(value - F.avg_pool2d(value, kernel_size=5, stride=1, padding=2))
-        center_score = self.center_gate(
+        local_contrast_cue = value - F.avg_pool2d(value, kernel_size=3, stride=1, padding=1)
+        contrast_response = local_contrast_cue.abs().mean(1, keepdim=True)
+        center_residual_cue = F.relu(value - F.avg_pool2d(value, kernel_size=5, stride=1, padding=2))
+        center_response = self.center_gate(
             torch.cat(
                 (
                     value.mean(1, keepdim=True),
                     value.amax(1, keepdim=True),
-                    contrast_mag,
-                    center_residual.mean(1, keepdim=True),
+                    contrast_response,
+                    center_residual_cue.mean(1, keepdim=True),
                 ),
                 1,
             )
         )
         if not self.enable_center:
-            center_score = torch.zeros_like(center_score)
+            center_response = torch.zeros_like(center_response)
 
-        edge_mag = self.sobel_x(value).abs() + self.sobel_y(value).abs()
-        laplace_mag = self.laplace(value).abs()
-        boundary_score = self.boundary_gate(torch.cat((edge_mag.mean(1, keepdim=True), laplace_mag.mean(1, keepdim=True), contrast_mag), 1))
+        sobel_edge_cue = self.sobel_x(value).abs() + self.sobel_y(value).abs()
+        laplace_edge_cue = self.laplace(value).abs()
+        boundary_response = self.boundary_gate(
+            torch.cat(
+                (sobel_edge_cue.mean(1, keepdim=True), laplace_edge_cue.mean(1, keepdim=True), contrast_response), 1
+            )
+        )
         if not self.enable_boundary:
-            boundary_score = torch.zeros_like(boundary_score)
+            boundary_response = torch.zeros_like(boundary_response)
 
-        crowd_score = F.avg_pool2d(center_score, kernel_size=5, stride=1, padding=2)
-        peak_score = F.max_pool2d(center_score, kernel_size=3, stride=1, padding=1)
-        repulsion_score = self.repulsion_gate(torch.cat((F.relu(peak_score - center_score), crowd_score, boundary_score), 1))
+        crowding_response = F.avg_pool2d(center_response, kernel_size=5, stride=1, padding=2)
+        peak_response = F.max_pool2d(center_response, kernel_size=3, stride=1, padding=1)
+        repulsion_response = self.repulsion_gate(
+            torch.cat((F.relu(peak_response - center_response), crowding_response, boundary_response), 1)
+        )
         if not self.enable_repulsion:
-            repulsion_score = torch.zeros_like(repulsion_score)
+            repulsion_response = torch.zeros_like(repulsion_response)
 
-        boundary_feat = self.boundary_proj(edge_mag + laplace_mag)
-        contrast_feat = self.contrast_proj(contrast)
-        repulsion_feat = self.repulsion_proj(contrast * (1.0 + repulsion_score) + boundary_feat * repulsion_score)
+        edge_boundary_cue = self.boundary_proj(sobel_edge_cue + laplace_edge_cue)
+        projected_contrast_cue = self.contrast_proj(local_contrast_cue)
+        repulsion_cue = self.repulsion_proj(
+            local_contrast_cue * (1.0 + repulsion_response) + edge_boundary_cue * repulsion_response
+        )
         if not self.enable_boundary:
-            boundary_feat = torch.zeros_like(boundary_feat)
+            edge_boundary_cue = torch.zeros_like(edge_boundary_cue)
         if not self.enable_repulsion:
-            repulsion_feat = torch.zeros_like(repulsion_feat)
+            repulsion_cue = torch.zeros_like(repulsion_cue)
 
-        center_branch = local_feat * center_score if self.enable_center else torch.zeros_like(local_feat)
-        boundary_branch = (local_feat + context_feat + boundary_feat) * boundary_score
-        repulsion_branch = repulsion_feat * repulsion_score
-        context_branch = context_feat * (1.0 + 0.5 * center_score) if self.enable_context else torch.zeros_like(context_feat)
-        branch_logits = self.branch_score(torch.cat((center_branch, boundary_branch, repulsion_branch, context_branch), 1))
+        center_guided_branch = (
+            local_texture_cue * center_response if self.enable_center else torch.zeros_like(local_texture_cue)
+        )
+        boundary_guided_branch = (local_texture_cue + context_receptive_cue + edge_boundary_cue) * boundary_response
+        repulsion_guided_branch = repulsion_cue * repulsion_response
+        context_guided_branch = (
+            context_receptive_cue * (1.0 + 0.5 * center_response)
+            if self.enable_context
+            else torch.zeros_like(context_receptive_cue)
+        )
+        branch_logits = self.branch_score(
+            torch.cat(
+                (center_guided_branch, boundary_guided_branch, repulsion_guided_branch, context_guided_branch), 1
+            )
+        )
         branch_enabled = self.branch_enabled.to(device=branch_logits.device, dtype=torch.bool)
         branch_logits = branch_logits.masked_fill(~branch_enabled, torch.finfo(branch_logits.dtype).min)
         branch_gate = branch_logits.softmax(dim=1)
         fused = (
-            center_branch * branch_gate[:, 0:1]
-            + boundary_branch * branch_gate[:, 1:2]
-            + repulsion_branch * branch_gate[:, 2:3]
-            + context_branch * branch_gate[:, 3:4]
+            center_guided_branch * branch_gate[:, 0:1]
+            + boundary_guided_branch * branch_gate[:, 1:2]
+            + repulsion_guided_branch * branch_gate[:, 2:3]
+            + context_guided_branch * branch_gate[:, 3:4]
         )
-        fused = fused * (1.0 + self.gamma.tanh() * repulsion_score) * self.channel_gate(fused)
+        fused = fused * (1.0 + self.gamma.tanh() * repulsion_response) * self.channel_gate(fused)
         spatial = self.spatial_gate(torch.cat((fused.mean(1, keepdim=True), fused.amax(1, keepdim=True)), 1))
         return self.proj(fused * spatial)
 
