@@ -1482,20 +1482,20 @@ class ABlockBCRS(nn.Module):
         num_heads,
         mlp_ratio=1.2,
         area=1,
-        enable_center=True,
+        enable_local=True,
         enable_boundary=True,
-        enable_repulsion=True,
-        enable_context=True,
+        enable_contrast=True,
+        enable_global=True,
     ):
         super().__init__()
         self.attn = WheatBCRSAttn(
             dim,
             num_heads=num_heads,
             area=area,
-            enable_center=enable_center,
+            enable_local=enable_local,
             enable_boundary=enable_boundary,
-            enable_repulsion=enable_repulsion,
-            enable_context=enable_context,
+            enable_contrast=enable_contrast,
+            enable_global=enable_global,
         )
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
@@ -1856,10 +1856,10 @@ class A2C2fBCRS(nn.Module):
         n=1,
         area=1,
         residual=False,
-        enable_center=True,
+        enable_local=True,
         enable_boundary=True,
-        enable_repulsion=True,
-        enable_context=True,
+        enable_contrast=True,
+        enable_global=True,
         mlp_ratio=2.0,
         e=0.5,
         g=1,
@@ -1883,10 +1883,10 @@ class A2C2fBCRS(nn.Module):
                         num_heads,
                         mlp_ratio,
                         area,
-                        enable_center=enable_center,
+                        enable_local=enable_local,
                         enable_boundary=enable_boundary,
-                        enable_repulsion=enable_repulsion,
-                        enable_context=enable_context,
+                        enable_contrast=enable_contrast,
+                        enable_global=enable_global,
                     )
                     for _ in range(2)
                 )
@@ -2048,19 +2048,19 @@ class BCRSAttn(nn.Module):
         self,
         dim: int,
         reduction: int = 16,
-        enable_center: bool = True,
+        enable_local: bool = True,
         enable_boundary: bool = True,
-        enable_repulsion: bool = True,
-        enable_context: bool = True,
+        enable_contrast: bool = True,
+        enable_global: bool = True,
     ):
         super().__init__()
-        if not any((enable_center, enable_boundary, enable_repulsion, enable_context)):
+        if not any((enable_local, enable_boundary, enable_contrast, enable_global)):
             raise ValueError("At least one BCRS branch must remain enabled.")
         hidden = max(dim // reduction, 8)
-        self.enable_center = enable_center
+        self.enable_local = enable_local
         self.enable_boundary = enable_boundary
-        self.enable_repulsion = enable_repulsion
-        self.enable_context = enable_context
+        self.enable_contrast = enable_contrast
+        self.enable_global = enable_global
         self.norm = nn.LayerNorm(dim)
         self.value = Conv(dim, dim, 1, 1, act=False)
         self.local = Conv(dim, dim, 3, 1, g=dim, act=False)
@@ -2099,7 +2099,7 @@ class BCRSAttn(nn.Module):
         self.gamma = nn.Parameter(torch.tensor(0.5))
         self.register_buffer(
             "branch_enabled",
-            torch.tensor([enable_center, enable_boundary, enable_repulsion, enable_context], dtype=torch.bool).view(
+            torch.tensor([enable_local, enable_boundary, enable_contrast, enable_global], dtype=torch.bool).view(
                 1, 4, 1, 1
             ),
             persistent=False,
@@ -2122,14 +2122,14 @@ class BCRSAttn(nn.Module):
         xn = self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
         value = self.value(xn)
         local_texture_cue = self.local(value)
-        context_receptive_cue = self.context(value)
-        if not self.enable_context:
-            context_receptive_cue = torch.zeros_like(context_receptive_cue)
+        global_receptive_cue = self.context(value)
+        if not self.enable_global:
+            global_receptive_cue = torch.zeros_like(global_receptive_cue)
 
         local_contrast_cue = value - F.avg_pool2d(value, kernel_size=3, stride=1, padding=1)
         contrast_response = local_contrast_cue.abs().mean(1, keepdim=True)
         center_residual_cue = F.relu(value - F.avg_pool2d(value, kernel_size=5, stride=1, padding=2))
-        center_response = self.center_gate(
+        local_response = self.center_gate(
             torch.cat(
                 (
                     value.mean(1, keepdim=True),
@@ -2140,8 +2140,8 @@ class BCRSAttn(nn.Module):
                 1,
             )
         )
-        if not self.enable_center:
-            center_response = torch.zeros_like(center_response)
+        if not self.enable_local:
+            local_response = torch.zeros_like(local_response)
 
         sobel_edge_cue = self.sobel_x(value).abs() + self.sobel_y(value).abs()
         laplace_edge_cue = self.laplace(value).abs()
@@ -2153,49 +2153,48 @@ class BCRSAttn(nn.Module):
         if not self.enable_boundary:
             boundary_response = torch.zeros_like(boundary_response)
 
-        crowding_response = F.avg_pool2d(center_response, kernel_size=5, stride=1, padding=2)
-        peak_response = F.max_pool2d(center_response, kernel_size=3, stride=1, padding=1)
-        repulsion_response = self.repulsion_gate(
-            torch.cat((F.relu(peak_response - center_response), crowding_response, boundary_response), 1)
+        crowding_response = F.avg_pool2d(local_response, kernel_size=5, stride=1, padding=2)
+        peak_response = F.max_pool2d(local_response, kernel_size=3, stride=1, padding=1)
+        contrast_separation_response = self.repulsion_gate(
+            torch.cat((F.relu(peak_response - local_response), crowding_response, boundary_response), 1)
         )
-        if not self.enable_repulsion:
-            repulsion_response = torch.zeros_like(repulsion_response)
+        if not self.enable_contrast:
+            contrast_separation_response = torch.zeros_like(contrast_separation_response)
 
         edge_boundary_cue = self.boundary_proj(sobel_edge_cue + laplace_edge_cue)
         projected_contrast_cue = self.contrast_proj(local_contrast_cue)
-        repulsion_cue = self.repulsion_proj(
-            local_contrast_cue * (1.0 + repulsion_response) + edge_boundary_cue * repulsion_response
+        contrast_separation_cue = self.repulsion_proj(
+            local_contrast_cue * (1.0 + contrast_separation_response)
+            + edge_boundary_cue * contrast_separation_response
         )
         if not self.enable_boundary:
             edge_boundary_cue = torch.zeros_like(edge_boundary_cue)
-        if not self.enable_repulsion:
-            repulsion_cue = torch.zeros_like(repulsion_cue)
+        if not self.enable_contrast:
+            contrast_separation_cue = torch.zeros_like(contrast_separation_cue)
 
-        center_guided_branch = (
-            local_texture_cue * center_response if self.enable_center else torch.zeros_like(local_texture_cue)
-        )
-        boundary_guided_branch = (local_texture_cue + context_receptive_cue + edge_boundary_cue) * boundary_response
-        repulsion_guided_branch = repulsion_cue * repulsion_response
-        context_guided_branch = (
-            context_receptive_cue * (1.0 + 0.5 * center_response)
-            if self.enable_context
-            else torch.zeros_like(context_receptive_cue)
+        local_branch = local_texture_cue * local_response if self.enable_local else torch.zeros_like(local_texture_cue)
+        boundary_branch = (local_texture_cue + global_receptive_cue + edge_boundary_cue) * boundary_response
+        contrast_branch = contrast_separation_cue * contrast_separation_response
+        global_branch = (
+            global_receptive_cue * (1.0 + 0.5 * local_response)
+            if self.enable_global
+            else torch.zeros_like(global_receptive_cue)
         )
         branch_logits = self.branch_score(
             torch.cat(
-                (center_guided_branch, boundary_guided_branch, repulsion_guided_branch, context_guided_branch), 1
+                (local_branch, boundary_branch, contrast_branch, global_branch), 1
             )
         )
         branch_enabled = self.branch_enabled.to(device=branch_logits.device, dtype=torch.bool)
         branch_logits = branch_logits.masked_fill(~branch_enabled, torch.finfo(branch_logits.dtype).min)
         branch_gate = branch_logits.softmax(dim=1)
         fused = (
-            center_guided_branch * branch_gate[:, 0:1]
-            + boundary_guided_branch * branch_gate[:, 1:2]
-            + repulsion_guided_branch * branch_gate[:, 2:3]
-            + context_guided_branch * branch_gate[:, 3:4]
+            local_branch * branch_gate[:, 0:1]
+            + boundary_branch * branch_gate[:, 1:2]
+            + contrast_branch * branch_gate[:, 2:3]
+            + global_branch * branch_gate[:, 3:4]
         )
-        fused = fused * (1.0 + self.gamma.tanh() * repulsion_response) * self.channel_gate(fused)
+        fused = fused * (1.0 + self.gamma.tanh() * contrast_separation_response) * self.channel_gate(fused)
         spatial = self.spatial_gate(torch.cat((fused.mean(1, keepdim=True), fused.amax(1, keepdim=True)), 1))
         return self.proj(fused * spatial)
 

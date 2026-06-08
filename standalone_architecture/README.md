@@ -12,10 +12,10 @@ Included:
 - explicit model definitions for both baseline and BCRS-P2
 - minimal building blocks required by this model
 - four-branch BCRS attention:
-  - center branch
+  - local branch
+  - global branch
+  - contrast branch
   - boundary branch
-  - repulsion branch
-  - context branch
 - P2-P5 four-scale detection head
 - demo script for model construction and forward pass
 
