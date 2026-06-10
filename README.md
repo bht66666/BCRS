@@ -25,10 +25,10 @@ The model includes:
 
 - Four-scale detection, including the highest-resolution stride-4 output.
 - Two LGCB backbone stages.
-- Four LGCB branches with consistent code and paper naming:
+- Four LGCB branches with naming aligned to the manuscript:
   - Local: depthwise 3 x 3 convolution for local features.
-  - Context: dilated depthwise convolution for contextual features.
-  - Global: average pooling followed by element-wise subtraction for global difference features.
+  - Global: dilated depthwise convolution for wider receptive-field features.
+  - Contrast: average pooling followed by element-wise subtraction for foreground-background differences.
   - Boundary: fixed Sobel and Laplace operators for boundary features.
 - DFL-based bounding-box regression.
 - Separate box regression and classification branches.

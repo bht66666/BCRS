@@ -591,9 +591,8 @@ class SARACountAttn(nn.Module):
 class LGCBAttn(nn.Module):
     """Local-Global Context Block for crowded instance separation.
 
-    The four branches are Local, Context, Global, and Boundary:
-    depthwise local features, dilated depthwise context features,
-    average-pooled difference features, and Sobel-Laplace boundary features.
+    The four named branches are Local, Global, Contrast, and Boundary.
+    Center and repulsion responses are internal gating signals, not additional branches.
     """
 
     def __init__(
@@ -604,24 +603,24 @@ class LGCBAttn(nn.Module):
         reduction=16,
         enable_local=True,
         enable_boundary=True,
+        enable_contrast=True,
         enable_global=True,
-        enable_context=True,
     ):
         super().__init__()
-        if not any((enable_local, enable_boundary, enable_global, enable_context)):
+        if not any((enable_local, enable_boundary, enable_contrast, enable_global)):
             raise ValueError("At least one LGCB branch must remain enabled.")
         hidden = max(dim // reduction, 8)
         self.enable_local = enable_local
         self.enable_boundary = enable_boundary
+        self.enable_contrast = enable_contrast
         self.enable_global = enable_global
-        self.enable_context = enable_context
         self.norm = nn.LayerNorm(dim)
         self.value = Conv(dim, dim, 1, 1, act=False)
         self.local = Conv(dim, dim, 3, 1, g=dim, act=False)
         self.context = Conv(dim, dim, 3, 1, g=dim, d=2, act=False)
-        self.global_proj = Conv(dim, dim, 1, 1, act=False)
+        self.contrast_proj = Conv(dim, dim, 1, 1, act=False)
         self.boundary_proj = Conv(dim, dim, 1, 1, act=False)
-        self.global_fuse = Conv(dim, dim, 1, 1, act=False)
+        self.repulsion_proj = Conv(dim, dim, 1, 1, act=False)
 
         self.center_gate = nn.Sequential(
             nn.Conv2d(4, hidden, 3, 1, 1, bias=True),
@@ -635,7 +634,7 @@ class LGCBAttn(nn.Module):
             nn.Conv2d(hidden, 1, 1, 1, 0, bias=True),
             nn.Sigmoid(),
         )
-        self.global_gate = nn.Sequential(
+        self.repulsion_gate = nn.Sequential(
             nn.Conv2d(3, hidden, 3, 1, 1, bias=True),
             nn.SiLU(),
             nn.Conv2d(hidden, 1, 1, 1, 0, bias=True),
@@ -658,7 +657,7 @@ class LGCBAttn(nn.Module):
         self.register_buffer(
             "branch_enabled",
             torch.tensor(
-                [enable_local, enable_boundary, enable_global, enable_context], dtype=torch.bool
+                [enable_local, enable_boundary, enable_contrast, enable_global], dtype=torch.bool
             ).view(1, 4, 1, 1),
             persistent=False,
         )
@@ -677,37 +676,6 @@ class LGCBAttn(nn.Module):
             for p in m.parameters():
                 p.requires_grad = False
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        legacy_names = {
-            "contrast_proj.": "global_proj.",
-            "repulsion_proj.": "global_fuse.",
-            "repulsion_gate.": "global_gate.",
-        }
-        for old_name, new_name in legacy_names.items():
-            old_prefix = prefix + old_name
-            for key in [key for key in state_dict if key.startswith(old_prefix)]:
-                new_key = prefix + new_name + key[len(old_prefix) :]
-                state_dict.setdefault(new_key, state_dict[key])
-                state_dict.pop(key)
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-
     def forward(self, x):
         branch_enabled_tensor = getattr(self, "branch_enabled", None)
         if branch_enabled_tensor is not None:
@@ -718,31 +686,26 @@ class LGCBAttn(nn.Module):
             branch_flags = [True, True, True, True]
         enable_local = bool(getattr(self, "enable_local", branch_flags[0]))
         enable_boundary = bool(getattr(self, "enable_boundary", branch_flags[1]))
-        if hasattr(self, "enable_context"):
-            enable_global = bool(getattr(self, "enable_global", branch_flags[2]))
-            enable_context = bool(getattr(self, "enable_context", branch_flags[3]))
-        else:
-            # Compatibility for modules serialized before the branch names were aligned.
-            enable_global = bool(getattr(self, "enable_contrast", branch_flags[2]))
-            enable_context = bool(getattr(self, "enable_global", branch_flags[3]))
+        enable_contrast = bool(getattr(self, "enable_contrast", branch_flags[2]))
+        enable_global = bool(getattr(self, "enable_global", branch_flags[3]))
 
         xn = self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
 
         value = self.value(xn)
         local_texture_cue = self.local(value)
-        context_feature = self.context(value)
-        if not enable_context:
-            context_feature = torch.zeros_like(context_feature)
+        global_receptive_cue = self.context(value)
+        if not enable_global:
+            global_receptive_cue = torch.zeros_like(global_receptive_cue)
 
-        global_difference_cue = value - F.avg_pool2d(value, kernel_size=3, stride=1, padding=1)
-        global_response = global_difference_cue.abs().mean(1, keepdim=True)
+        local_contrast_cue = value - F.avg_pool2d(value, kernel_size=3, stride=1, padding=1)
+        contrast_response = local_contrast_cue.abs().mean(1, keepdim=True)
         center_residual_cue = F.relu(value - F.avg_pool2d(value, kernel_size=5, stride=1, padding=2))
         local_response = self.center_gate(
             torch.cat(
                 (
                     value.mean(1, keepdim=True),
                     value.amax(1, keepdim=True),
-                    global_response,
+                    contrast_response,
                     center_residual_cue.mean(1, keepdim=True),
                 ),
                 1,
@@ -758,7 +721,7 @@ class LGCBAttn(nn.Module):
                 (
                     sobel_edge_cue.mean(1, keepdim=True),
                     laplace_edge_cue.mean(1, keepdim=True),
-                    global_response,
+                    contrast_response,
                 ),
                 1,
             )
@@ -768,10 +731,7 @@ class LGCBAttn(nn.Module):
 
         crowding_response = F.avg_pool2d(local_response, kernel_size=5, stride=1, padding=2)
         peak_response = F.max_pool2d(local_response, kernel_size=3, stride=1, padding=1)
-        global_gate = getattr(self, "global_gate", None)
-        if global_gate is None:
-            global_gate = self.repulsion_gate
-        global_separation_response = global_gate(
+        contrast_separation_response = self.repulsion_gate(
             torch.cat(
                 (
                     F.relu(peak_response - local_response),
@@ -781,42 +741,36 @@ class LGCBAttn(nn.Module):
                 1,
             )
         )
-        if not enable_global:
-            global_separation_response = torch.zeros_like(global_separation_response)
+        if not enable_contrast:
+            contrast_separation_response = torch.zeros_like(contrast_separation_response)
 
         edge_boundary_cue = self.boundary_proj(sobel_edge_cue + laplace_edge_cue)
-        global_proj = getattr(self, "global_proj", None)
-        if global_proj is None:
-            global_proj = self.contrast_proj
-        global_fuse = getattr(self, "global_fuse", None)
-        if global_fuse is None:
-            global_fuse = self.repulsion_proj
-        projected_global_cue = global_proj(global_difference_cue)
-        global_separation_cue = global_fuse(
-            global_difference_cue * (1.0 + global_separation_response)
-            + edge_boundary_cue * global_separation_response
+        projected_contrast_cue = self.contrast_proj(local_contrast_cue)
+        contrast_separation_cue = self.repulsion_proj(
+            local_contrast_cue * (1.0 + contrast_separation_response)
+            + edge_boundary_cue * contrast_separation_response
         )
         if not enable_boundary:
             edge_boundary_cue = torch.zeros_like(edge_boundary_cue)
-        if not enable_global:
-            global_separation_cue = torch.zeros_like(global_separation_cue)
+        if not enable_contrast:
+            contrast_separation_cue = torch.zeros_like(contrast_separation_cue)
 
         local_branch = local_texture_cue * local_response
-        boundary_branch = (local_texture_cue + context_feature + edge_boundary_cue) * boundary_response
-        global_branch = global_separation_cue * global_separation_response
-        context_branch = context_feature * (1.0 + 0.5 * local_response)
+        boundary_branch = (local_texture_cue + global_receptive_cue + edge_boundary_cue) * boundary_response
+        contrast_branch = contrast_separation_cue * contrast_separation_response
+        global_branch = global_receptive_cue * (1.0 + 0.5 * local_response)
         if not enable_local:
             local_branch = torch.zeros_like(local_branch)
         if not enable_boundary:
             boundary_branch = torch.zeros_like(boundary_branch)
+        if not enable_contrast:
+            contrast_branch = torch.zeros_like(contrast_branch)
         if not enable_global:
             global_branch = torch.zeros_like(global_branch)
-        if not enable_context:
-            context_branch = torch.zeros_like(context_branch)
 
         branch_logits = self.branch_score(
             torch.cat(
-                (local_branch, boundary_branch, global_branch, context_branch), 1
+                (local_branch, boundary_branch, contrast_branch, global_branch), 1
             )
         )
         if branch_enabled_tensor is None:
@@ -828,25 +782,25 @@ class LGCBAttn(nn.Module):
         fused = (
             local_branch * branch_gate[:, 0:1]
             + boundary_branch * branch_gate[:, 1:2]
-            + global_branch * branch_gate[:, 2:3]
-            + context_branch * branch_gate[:, 3:4]
+            + contrast_branch * branch_gate[:, 2:3]
+            + global_branch * branch_gate[:, 3:4]
         )
-        fused = fused * (1.0 + self.gamma.tanh() * global_separation_response) * self.channel_gate(fused)
+        fused = fused * (1.0 + self.gamma.tanh() * contrast_separation_response) * self.channel_gate(fused)
         spatial = self.spatial_gate(torch.cat((fused.mean(1, keepdim=True), fused.amax(1, keepdim=True)), 1))
         out = self.proj(fused * spatial)
         if getattr(self, "collect_branch_maps", False):
             self.last_branch_maps = {
                 "input_feature": x.detach().float().cpu(),
                 "local_texture_cue": local_texture_cue.detach().float().cpu(),
-                "context_feature": context_feature.detach().float().cpu(),
-                "projected_global_cue": projected_global_cue.detach().float().cpu(),
+                "global_receptive_cue": global_receptive_cue.detach().float().cpu(),
+                "projected_contrast_cue": projected_contrast_cue.detach().float().cpu(),
                 "edge_boundary_cue": edge_boundary_cue.detach().float().cpu(),
                 "local_response": local_response.detach().float().cpu(),
                 "boundary_response": boundary_response.detach().float().cpu(),
-                "global_separation_response": global_separation_response.detach().float().cpu(),
+                "contrast_separation_response": contrast_separation_response.detach().float().cpu(),
                 "local_branch": local_branch.detach().float().cpu(),
-                "context_branch": context_branch.detach().float().cpu(),
                 "global_branch": global_branch.detach().float().cpu(),
+                "contrast_branch": contrast_branch.detach().float().cpu(),
                 "boundary_branch": boundary_branch.detach().float().cpu(),
                 "branch_gate": branch_gate.detach().float().cpu(),
                 "output_feature": out.detach().float().cpu(),
