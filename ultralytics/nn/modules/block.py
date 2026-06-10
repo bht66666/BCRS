@@ -9,7 +9,7 @@ from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
-from .wheat import ASFConcat2, BCRSAttn as WheatBCRSAttn, CoordCountAttn, DBRACountAttn, DCLCAttn, EMACountAttn, LSKCountAttn, SARACountAttn, SCAMCountAttn, SMSSAAttn, SparseCountAttn, SpikeSepAttn, VLCCountAttn, WheatEnhance
+from .wheat import ASFConcat2, LGCBAttn as WheatLGCBAttn, CoordCountAttn, DBRACountAttn, DCLCAttn, EMACountAttn, LSKCountAttn, SARACountAttn, SCAMCountAttn, SMSSAAttn, SparseCountAttn, SpikeSepAttn, VLCCountAttn, WheatEnhance
 
 __all__ = (
     "DFL",
@@ -59,6 +59,7 @@ __all__ = (
     "A2C2fSARA",
     "A2C2fSCAM",
     "A2C2fSMSSA",
+    "A2C2fLGCB",
     "A2C2fBCRS",
     "A2C2fSpike",
     "A2C2fDCLC",
@@ -1473,8 +1474,8 @@ class ABlockSARA(nn.Module):
         return x
 
 
-class ABlockBCRS(nn.Module):
-    """ABlock variant using boundary-contrast repulsion separation attention."""
+class ABlockLGCB(nn.Module):
+    """ABlock variant using the Local-Global Context Block."""
 
     def __init__(
         self,
@@ -1488,7 +1489,7 @@ class ABlockBCRS(nn.Module):
         enable_global=True,
     ):
         super().__init__()
-        self.attn = WheatBCRSAttn(
+        self.attn = WheatLGCBAttn(
             dim,
             num_heads=num_heads,
             area=area,
@@ -1510,10 +1511,13 @@ class ABlockBCRS(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        """Forward pass with BCRS attention and MLP residuals."""
+        """Forward pass with LGCB attention and MLP residuals."""
         x = x + self.attn(x)
         x = x + self.mlp(x)
         return x
+
+
+ABlockBCRS = ABlockLGCB
 
 
 class ABlockSpike(nn.Module):
@@ -1846,8 +1850,8 @@ class A2C2fSMSSA(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
-class A2C2fBCRS(nn.Module):
-    """A2C2f variant that keeps the R-ELAN shell and swaps AAttn for BCRS."""
+class A2C2fLGCB(nn.Module):
+    """A2C2f variant that keeps the R-ELAN shell and uses LGCB."""
 
     def __init__(
         self,
@@ -1867,7 +1871,7 @@ class A2C2fBCRS(nn.Module):
     ):
         super().__init__()
         c_ = int(c2 * e)
-        assert c_ % 32 == 0, "Dimension of ABlockBCRS must be a multiple of 32."
+        assert c_ % 32 == 0, "Dimension of ABlockLGCB must be a multiple of 32."
 
         num_heads = c_ // 32
         self.cv1 = Conv(c1, c_, 1, 1)
@@ -1878,7 +1882,7 @@ class A2C2fBCRS(nn.Module):
         self.m = nn.ModuleList(
             nn.Sequential(
                 *(
-                    ABlockBCRS(
+                    ABlockLGCB(
                         c_,
                         num_heads,
                         mlp_ratio,
@@ -1895,12 +1899,15 @@ class A2C2fBCRS(nn.Module):
         )
 
     def forward(self, x):
-        """Forward pass through BCRS-enhanced R-ELAN."""
+        """Forward pass through LGCB-enhanced R-ELAN."""
         y = [self.cv1(x)]
         y.extend(m(y[-1]) for m in self.m)
         if self.gamma is not None:
             return x + self.gamma.view(1, -1, 1, 1) * self.cv2(torch.cat(y, 1))
         return self.cv2(torch.cat(y, 1))
+
+
+A2C2fBCRS = A2C2fLGCB
 
 
 class A2C2fSpike(nn.Module):

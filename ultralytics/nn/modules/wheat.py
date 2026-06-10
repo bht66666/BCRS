@@ -19,6 +19,7 @@ __all__ = (
     "LSKCountAttn",
     "DBRACountAttn",
     "SARACountAttn",
+    "LGCBAttn",
     "BCRSAttn",
     "SpikeSepAttn",
     "DCLCAttn",
@@ -587,8 +588,8 @@ class SARACountAttn(nn.Module):
         return self.out_act(self.res_scale * y)
 
 
-class BCRSAttn(nn.Module):
-    """Boundary-Contrast Repulsion Separation attention for crowded instance separation.
+class LGCBAttn(nn.Module):
+    """Local-Global Context Block for crowded instance separation.
 
     The implementation separates three concepts to avoid ambiguity:
     low-level cues, response maps, and the final guided fusion branches.
@@ -607,7 +608,7 @@ class BCRSAttn(nn.Module):
     ):
         super().__init__()
         if not any((enable_local, enable_boundary, enable_contrast, enable_global)):
-            raise ValueError("At least one BCRS branch must remain enabled.")
+            raise ValueError("At least one LGCB branch must remain enabled.")
         hidden = max(dim // reduction, 8)
         self.enable_local = enable_local
         self.enable_boundary = enable_boundary
@@ -805,6 +806,9 @@ class BCRSAttn(nn.Module):
                 "output_feature": out.detach().float().cpu(),
             }
         return out
+
+
+BCRSAttn = LGCBAttn
 
 
 class SpikeSepAttn(nn.Module):

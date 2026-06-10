@@ -1,38 +1,47 @@
-# YOLOv12-BCRS-P2 Wheat Detection
+# YOLOv12-LGCB-Lite Wheat Detection
 
-This repository contains the minimal training project used for the YOLOv12-BCRS-P2 wheat detection/counting experiments.
+This repository provides the training code for the lightweight YOLOv12-LGCB model used for dense wheat detection and counting.
 
-It keeps the Ultralytics training path intact and adds the BCRS attention modules and YOLOv12-P2 model configuration used by our training script.
+LGCB denotes the Local-Global Context Block. The model retains four detection outputs, named P1-P4 in this project, and uses a lightweight box regression head.
 
-## Included
+## Model
 
-- `train_bcrs_p2_100.py`: the 100-epoch training entry used for YOLOv12-BCRS-P2.
-- `ultralytics/`: the source tree required by the local training framework.
-- `ultralytics/cfg/models/v12/yolov12n-ablate-bcrs-p2.yaml`: YOLOv12 with BCRS attention in the backbone area-attention blocks and a P2-P5 detection head.
-- `data/wheat.yaml`: dataset configuration template for one-class wheat detection.
-- `standalone_architecture/`: a small independent PyTorch architecture package for quick forward-pass inspection.
+- Model configuration: `ultralytics/cfg/models/v12/yolov12n-lgcb-lite.yaml`
+- Training entry: `train_lgcb_lite_100.py`
+- Attention block: `LGCBAttn`
+- Backbone wrapper: `A2C2fLGCB`
+- Lightweight detection head: `LGCBLiteDetect`
+- Detection outputs: P1, P2, P3, and P4
+- Actual output strides: 4, 8, 16, and 32
+- Input resolution used for profiling: `1024 x 1024`
+- Parameters: `2.363 M`
+- FLOPs: `16.402 G`
 
-## Not Included
+P1-P4 are project-specific display names. They correspond to the feature maps conventionally named P2-P5 in standard FPN terminology. The renaming does not change feature-map resolution or model computation.
 
-- Dataset images and labels.
-- Training outputs under `runs/`.
-- Model weights such as `.pt`, `.pth`, `.onnx`, or `.engine`.
-- Paper drafts, spreadsheets, visual exports, and other experiment artifacts.
+## Lightweight Design
+
+The model retains:
+
+- Four-scale detection, including the highest-resolution stride-4 output.
+- Both LGCB backbone stages.
+- The original DFL representation and prediction format.
+- The original classification branch.
+
+The box regression branch replaces standard `3 x 3` convolutions with depthwise-separable convolutions. Under the same `1024 x 1024` profiling setting, this reduces complexity from `25.886 G` to `16.402 G`, a reduction of approximately `36.6%`.
 
 ## Environment
 
-Install PyTorch for your CUDA version first, then install this project in editable mode:
+Install PyTorch for the required CUDA version first, then install the project:
 
 ```bash
 pip install -e .
 pip install -r requirements.txt
 ```
 
-The original training environment used a CUDA GPU. CPU execution is possible for code checks but is not practical for full 1024-resolution training.
+## Dataset
 
-## Dataset Layout
-
-Prepare a YOLO-format dataset and update `data/wheat.yaml` if your path is different:
+Prepare a one-class YOLO-format wheat dataset:
 
 ```text
 data/wheat/
@@ -46,44 +55,36 @@ data/wheat/
     test/
 ```
 
-The label files should use normal YOLO detection format:
-
-```text
-class x_center y_center width height
-```
-
-For the wheat experiments, `nc=1` and class `0` is `wheat`.
+Update `data/wheat.yaml` if the dataset is stored elsewhere.
 
 ## Train
 
-Place the YOLOv12n pretrained weight at the repository root as `yolov12n.pt`, or edit `train_bcrs_p2_100.py` to point to your pretrained weight.
+Place the YOLOv12n pretrained weights at the repository root as `yolov12n.pt`, or update the weight path in the training script.
 
 ```bash
-python train_bcrs_p2_100.py
+python train_lgcb_lite_100.py
 ```
 
-Default training settings in the script:
+Default settings:
 
-- model: `ultralytics/cfg/models/v12/yolov12n-ablate-bcrs-p2.yaml`
-- data: `data/wheat.yaml`
-- epochs: `100`
-- image size: `1024`
-- batch size: `4`
-- device: `0`
-- output: `runs/detect/ablate_bcrs_p2_100`
+- Epochs: `100`
+- Image size: `1024`
+- Batch size: `4`
+- Device: `0`
+- Output directory: `runs/detect/lgcb_lite_p1_p4_100`
 
-## Quick Architecture Smoke Test
+## Profile
 
-The standalone package can be checked without the Ultralytics parser:
+Reproduce the parameter and FLOPs measurement:
 
 ```bash
-cd standalone_architecture
-pip install -r requirements.txt
-python demo_build.py
+python tools/profile_model_flops.py ultralytics/cfg/models/v12/yolov12n-lgcb-lite.yaml --imgsz 1024
 ```
 
-This only verifies model construction and forward output shape. Use `train_bcrs_p2_100.py` for the actual training workflow.
+## Compatibility
+
+Legacy model names remain available internally so that historical configurations and checkpoints are not broken. The current lightweight release uses only the LGCB naming in its model configuration and training entry.
 
 ## License
 
-This project is based on Ultralytics YOLO and keeps the AGPL-3.0 license.
+This project is based on Ultralytics YOLO and retains the AGPL-3.0 license.

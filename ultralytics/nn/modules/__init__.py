@@ -59,6 +59,7 @@ from .block import (
     SCDown,
     TorchVision,
     A2C2f,
+    A2C2fLGCB,
     A2C2fBCRS,
     A2C2fDBRA,
     A2C2fLSK,
@@ -88,7 +89,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
+from .head import BCRSLiteDetect, LGCBLiteDetect, OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
 from .transformer import (
     AIFI,
     MLP,
@@ -101,7 +102,7 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
-from .wheat import ASFConcat2, BCRSAttn, CoordCountAttn, DBRACountAttn, DCLCAttn, EMACountAttn, LSKCountAttn, SARACountAttn, SCAMCountAttn, SMSSAAttn, SparseCountAttn, SpikeSepAttn, VLCCountAttn, WheatCountRefine, WheatEnhance
+from .wheat import ASFConcat2, BCRSAttn, LGCBAttn, CoordCountAttn, DBRACountAttn, DCLCAttn, EMACountAttn, LSKCountAttn, SARACountAttn, SCAMCountAttn, SMSSAAttn, SparseCountAttn, SpikeSepAttn, VLCCountAttn, WheatCountRefine, WheatEnhance
 
 __all__ = (
     "Conv",
@@ -144,6 +145,8 @@ __all__ = (
     "BottleneckCSP",
     "Proto",
     "Detect",
+    "LGCBLiteDetect",
+    "BCRSLiteDetect",
     "Segment",
     "Pose",
     "Classify",
@@ -178,6 +181,7 @@ __all__ = (
     "WheatEnhance",
     "WheatCountRefine",
     "ASFConcat2",
+    "LGCBAttn",
     "BCRSAttn",
     "DBRACountAttn",
     "LSKCountAttn",
@@ -192,6 +196,7 @@ __all__ = (
     "SparseCountAttn",
     "Index",
     "A2C2f",
+    "A2C2fLGCB",
     "A2C2fBCRS",
     "A2C2fDBRA",
     "A2C2fLSK",
