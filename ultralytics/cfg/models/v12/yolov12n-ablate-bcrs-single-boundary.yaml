@@ -1,4 +1,4 @@
-# YOLOv12 BCRS single-branch ablation: boundary branch only inside BCRS at Backbone P5/32 + P2
+# YOLOv12 LGCB single-branch ablation: boundary branch only at Backbone P5/32 + P2
 
 nc: 1
 scales:
@@ -17,7 +17,7 @@ backbone:
   - [-1, 1, Conv, [512, 3, 2]]
   - [-1, 4, A2C2f, [512, True, 4]]
   - [-1, 1, Conv, [1024, 3, 2]]
-  - [-1, 4, A2C2fBCRS, [1024, 1, True, False, True, False, False]]
+  - [-1, 4, A2C2fLGCB, [1024, 1, True, False, True, False, False]]
 
 head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]

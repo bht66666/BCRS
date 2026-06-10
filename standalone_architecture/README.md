@@ -13,8 +13,8 @@ Included:
 - minimal building blocks required by this model
 - four-branch BCRS attention:
   - local branch
+  - context branch
   - global branch
-  - contrast branch
   - boundary branch
 - P2-P5 four-scale detection head
 - demo script for model construction and forward pass

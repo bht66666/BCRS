@@ -95,10 +95,7 @@ class C3k2(C2f):
 
 
 class BCRSAttn(nn.Module):
-    """Boundary-Contrast Repulsion Separation attention for dense object separation.
-
-    The implementation separates low-level cues, response maps, and final guided fusion branches.
-    """
+    """Four-branch attention with Local, Context, Global, and Boundary features."""
 
     def __init__(
         self,
@@ -108,25 +105,25 @@ class BCRSAttn(nn.Module):
         reduction=16,
         enable_local=True,
         enable_boundary=True,
-        enable_contrast=True,
         enable_global=True,
+        enable_context=True,
     ):
         super().__init__()
-        if not any((enable_local, enable_boundary, enable_contrast, enable_global)):
+        if not any((enable_local, enable_boundary, enable_global, enable_context)):
             raise ValueError("At least one BCRS branch must remain enabled.")
 
         hidden = max(dim // reduction, 8)
         self.enable_local = enable_local
         self.enable_boundary = enable_boundary
-        self.enable_contrast = enable_contrast
         self.enable_global = enable_global
+        self.enable_context = enable_context
         self.norm = nn.LayerNorm(dim)
         self.value = Conv(dim, dim, 1, 1, act=False)
         self.local = Conv(dim, dim, 3, 1, g=dim, act=False)
         self.context = Conv(dim, dim, 3, 1, g=dim, d=2, act=False)
-        self.contrast_proj = Conv(dim, dim, 1, 1, act=False)
+        self.global_proj = Conv(dim, dim, 1, 1, act=False)
         self.boundary_proj = Conv(dim, dim, 1, 1, act=False)
-        self.repulsion_proj = Conv(dim, dim, 1, 1, act=False)
+        self.global_fuse = Conv(dim, dim, 1, 1, act=False)
 
         self.center_gate = nn.Sequential(
             nn.Conv2d(4, hidden, 3, 1, 1, bias=True),
@@ -140,7 +137,7 @@ class BCRSAttn(nn.Module):
             nn.Conv2d(hidden, 1, 1, 1, 0, bias=True),
             nn.Sigmoid(),
         )
-        self.repulsion_gate = nn.Sequential(
+        self.global_gate = nn.Sequential(
             nn.Conv2d(3, hidden, 3, 1, 1, bias=True),
             nn.SiLU(),
             nn.Conv2d(hidden, 1, 1, 1, 0, bias=True),
@@ -163,7 +160,7 @@ class BCRSAttn(nn.Module):
         self.register_buffer(
             "branch_enabled",
             torch.tensor(
-                [enable_local, enable_boundary, enable_contrast, enable_global], dtype=torch.bool
+                [enable_local, enable_boundary, enable_global, enable_context], dtype=torch.bool
             ).view(1, 4, 1, 1),
             persistent=False,
         )
@@ -184,17 +181,17 @@ class BCRSAttn(nn.Module):
 
     def forward(self, x):
         branch_enabled = self.branch_enabled.to(device=x.device, dtype=torch.bool)
-        enable_local, enable_boundary, enable_contrast, enable_global = branch_enabled.view(-1).tolist()
+        enable_local, enable_boundary, enable_global, enable_context = branch_enabled.view(-1).tolist()
 
         xn = self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
         value = self.value(xn)
         local_texture_cue = self.local(value)
-        global_receptive_cue = self.context(value)
-        if not enable_global:
-            global_receptive_cue = torch.zeros_like(global_receptive_cue)
+        context_feature = self.context(value)
+        if not enable_context:
+            context_feature = torch.zeros_like(context_feature)
 
-        local_contrast_cue = value - torch.nn.functional.avg_pool2d(value, kernel_size=3, stride=1, padding=1)
-        contrast_response = local_contrast_cue.abs().mean(1, keepdim=True)
+        global_difference_cue = value - torch.nn.functional.avg_pool2d(value, kernel_size=3, stride=1, padding=1)
+        global_response = global_difference_cue.abs().mean(1, keepdim=True)
         center_residual_cue = torch.nn.functional.relu(
             value - torch.nn.functional.avg_pool2d(value, kernel_size=5, stride=1, padding=2)
         )
@@ -203,7 +200,7 @@ class BCRSAttn(nn.Module):
                 (
                     value.mean(1, keepdim=True),
                     value.amax(1, keepdim=True),
-                    contrast_response,
+                    global_response,
                     center_residual_cue.mean(1, keepdim=True),
                 ),
                 1,
@@ -216,7 +213,7 @@ class BCRSAttn(nn.Module):
         laplace_edge_cue = self.laplace(value).abs()
         boundary_response = self.boundary_gate(
             torch.cat(
-                (sobel_edge_cue.mean(1, keepdim=True), laplace_edge_cue.mean(1, keepdim=True), contrast_response), 1
+                (sobel_edge_cue.mean(1, keepdim=True), laplace_edge_cue.mean(1, keepdim=True), global_response), 1
             )
         )
         if not enable_boundary:
@@ -224,41 +221,41 @@ class BCRSAttn(nn.Module):
 
         crowding_response = torch.nn.functional.avg_pool2d(local_response, kernel_size=5, stride=1, padding=2)
         peak_response = torch.nn.functional.max_pool2d(local_response, kernel_size=3, stride=1, padding=1)
-        contrast_separation_response = self.repulsion_gate(
+        global_separation_response = self.global_gate(
             torch.cat(
                 (torch.nn.functional.relu(peak_response - local_response), crowding_response, boundary_response), 1
             )
         )
-        if not enable_contrast:
-            contrast_separation_response = torch.zeros_like(contrast_separation_response)
+        if not enable_global:
+            global_separation_response = torch.zeros_like(global_separation_response)
 
         edge_boundary_cue = self.boundary_proj(sobel_edge_cue + laplace_edge_cue)
-        projected_contrast_cue = self.contrast_proj(local_contrast_cue)
-        contrast_separation_cue = self.repulsion_proj(
-            projected_contrast_cue * (1.0 + contrast_separation_response)
-            + edge_boundary_cue * contrast_separation_response
+        projected_global_cue = self.global_proj(global_difference_cue)
+        global_separation_cue = self.global_fuse(
+            projected_global_cue * (1.0 + global_separation_response)
+            + edge_boundary_cue * global_separation_response
         )
         if not enable_boundary:
             edge_boundary_cue = torch.zeros_like(edge_boundary_cue)
-        if not enable_contrast:
-            contrast_separation_cue = torch.zeros_like(contrast_separation_cue)
+        if not enable_global:
+            global_separation_cue = torch.zeros_like(global_separation_cue)
 
         local_branch = local_texture_cue * local_response
-        boundary_branch = (local_texture_cue + global_receptive_cue + edge_boundary_cue) * boundary_response
-        contrast_branch = contrast_separation_cue * contrast_separation_response
-        global_branch = global_receptive_cue * (1.0 + 0.5 * local_response)
+        boundary_branch = (local_texture_cue + context_feature + edge_boundary_cue) * boundary_response
+        global_branch = global_separation_cue * global_separation_response
+        context_branch = context_feature * (1.0 + 0.5 * local_response)
         if not enable_local:
             local_branch = torch.zeros_like(local_branch)
         if not enable_boundary:
             boundary_branch = torch.zeros_like(boundary_branch)
-        if not enable_contrast:
-            contrast_branch = torch.zeros_like(contrast_branch)
         if not enable_global:
             global_branch = torch.zeros_like(global_branch)
+        if not enable_context:
+            context_branch = torch.zeros_like(context_branch)
 
         branch_logits = self.branch_score(
             torch.cat(
-                (local_branch, boundary_branch, contrast_branch, global_branch), 1
+                (local_branch, boundary_branch, global_branch, context_branch), 1
             )
         )
         branch_logits = branch_logits.masked_fill(~branch_enabled, torch.finfo(branch_logits.dtype).min)
@@ -266,10 +263,10 @@ class BCRSAttn(nn.Module):
         fused = (
             local_branch * branch_gate[:, 0:1]
             + boundary_branch * branch_gate[:, 1:2]
-            + contrast_branch * branch_gate[:, 2:3]
-            + global_branch * branch_gate[:, 3:4]
+            + global_branch * branch_gate[:, 2:3]
+            + context_branch * branch_gate[:, 3:4]
         )
-        fused = fused * (1.0 + self.gamma.tanh() * contrast_separation_response) * self.channel_gate(fused)
+        fused = fused * (1.0 + self.gamma.tanh() * global_separation_response) * self.channel_gate(fused)
         spatial = self.spatial_gate(torch.cat((fused.mean(1, keepdim=True), fused.amax(1, keepdim=True)), 1))
         return self.proj(fused * spatial)
 
@@ -283,8 +280,8 @@ class ABlockBCRS(nn.Module):
         area=1,
         enable_local=True,
         enable_boundary=True,
-        enable_contrast=True,
         enable_global=True,
+        enable_context=True,
     ):
         super().__init__()
         self.attn = BCRSAttn(
@@ -293,8 +290,8 @@ class ABlockBCRS(nn.Module):
             area=area,
             enable_local=enable_local,
             enable_boundary=enable_boundary,
-            enable_contrast=enable_contrast,
             enable_global=enable_global,
+            enable_context=enable_context,
         )
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
@@ -345,8 +342,8 @@ class A2C2fBCRS(nn.Module):
         residual=False,
         enable_local=True,
         enable_boundary=True,
-        enable_contrast=True,
         enable_global=True,
+        enable_context=True,
         mlp_ratio=2.0,
         e=0.5,
     ):
@@ -367,8 +364,8 @@ class A2C2fBCRS(nn.Module):
                         area,
                         enable_local=enable_local,
                         enable_boundary=enable_boundary,
-                        enable_contrast=enable_contrast,
                         enable_global=enable_global,
+                        enable_context=enable_context,
                     )
                     for _ in range(2)
                 )
