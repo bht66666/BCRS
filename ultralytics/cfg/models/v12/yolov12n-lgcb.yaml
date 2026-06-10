@@ -1,4 +1,4 @@
-# Lightweight YOLOv12-LGCB with P1-P4 outputs and a depthwise-separable box regression head
+# YOLOv12-LGCB with P1-P4 outputs
 
 nc: 1
 scales:
@@ -45,4 +45,4 @@ head:
   - [-1, 2, C3k2, [1024, True]]
 
   # P1-P4 correspond to strides 4, 8, 16, and 32.
-  - [[17, 20, 23, 26], 1, LGCBLiteDetect, [nc]]
+  - [[17, 20, 23, 26], 1, LGCBDetect, [nc]]

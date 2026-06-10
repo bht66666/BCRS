@@ -15,7 +15,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "LGCBLiteDetect", "BCRSLiteDetect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
+__all__ = "Detect", "LGCBDetect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
 
 
 class Detect(nn.Module):
@@ -172,7 +172,7 @@ class Detect(nn.Module):
         return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
 
 
-class LGCBLiteDetect(Detect):
+class LGCBDetect(Detect):
     """Detect head with a depthwise-separable box regression branch."""
 
     def __init__(self, nc=80, ch=()):
@@ -186,9 +186,6 @@ class LGCBLiteDetect(Detect):
             )
             for x in ch
         )
-
-
-BCRSLiteDetect = LGCBLiteDetect
 
 
 class Segment(Detect):

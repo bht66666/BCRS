@@ -43,8 +43,7 @@ from ultralytics.nn.modules import (
     Conv,
     Conv2,
     ConvTranspose,
-    LGCBLiteDetect,
-    BCRSLiteDetect,
+    LGCBDetect,
     Detect,
     DWConv,
     DWConvTranspose2d,
@@ -1150,11 +1149,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is ASFConcat2:
             c2 = sum(ch[x] for x in f)
             args = [[ch[x] for x in f], *args]
-        elif m in {Detect, LGCBLiteDetect, BCRSLiteDetect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
+        elif m in {Detect, LGCBDetect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, LGCBLiteDetect, BCRSLiteDetect, Segment, Pose, OBB}:
+            if m in {Detect, LGCBDetect, Segment, Pose, OBB}:
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])

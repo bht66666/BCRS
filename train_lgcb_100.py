@@ -8,7 +8,7 @@ from ultralytics import YOLO
 
 
 def main() -> None:
-    model = YOLO(str(root / "ultralytics" / "cfg" / "models" / "v12" / "yolov12n-lgcb-lite.yaml"))
+    model = YOLO(str(root / "ultralytics" / "cfg" / "models" / "v12" / "yolov12n-lgcb.yaml"))
     model.train(
         data=str(root / "data" / "wheat.yaml"),
         epochs=100,
@@ -18,7 +18,7 @@ def main() -> None:
         workers=0,
         pretrained=str(root / "yolov12n.pt"),
         project=str(root / "runs" / "detect"),
-        name="lgcb_lite_p1_p4_100",
+        name="lgcb_p1_p4_100",
         exist_ok=True,
     )
 
